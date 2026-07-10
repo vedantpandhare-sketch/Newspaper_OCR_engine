@@ -1,0 +1,10 @@
+# Core deps
+numpy
+opencv-python
+pdf2image
+paddleocr
+
+# Optional: faster image ops / common utilities used by OCR stacks
+# (not required, but harmless if compatible)
+Pillow
+

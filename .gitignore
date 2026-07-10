@@ -1,0 +1,63 @@
+# --- Virtual environments ---
+venv/
+.venv/
+
+# --- Python cache / build artifacts ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- Installer / packaging ---
+pip-wheel-metadata/
+wheelhouse/
+
+# --- Logs ---
+*.log
+
+# --- Environment variables ---
+.env
+.env.*
+!.env.example
+
+# --- Jupyter / IPython ---
+.ipynb_checkpoints/
+
+# --- Django / Flask / misc frameworks ---
+*.sqlite3
+db.sqlite3
+instance/
+.webassets-cache/
+
+# --- OS / Windows / macOS ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# --- Git / backups ---
+*~
+*.swp
+*.bak
+*.tmp
+
+# --- PDF / data artifacts (optional common) ---
+
+
