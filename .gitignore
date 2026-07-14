@@ -1,5 +1,5 @@
 # --- Virtual environments ---
-venv/
+venv310/
 .venv/
 
 # --- Python cache / build artifacts ---

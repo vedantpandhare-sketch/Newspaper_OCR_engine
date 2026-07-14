@@ -2,6 +2,7 @@ import os
 import cv2
 import json
 import numpy as np
+import time
 import fitz  # PyMuPDF
 from paddleocr import PaddleOCR
 
@@ -10,7 +11,7 @@ class MarathiNewspaperTwoDimPipeline:
         print("[System] Initializing Two-Dimensional Marathi Extraction Core...")
         self.ocr_engine = PaddleOCR(
             use_angle_cls=False, 
-            lang='mr', 
+            lang='devanagari', 
             use_gpu=False, 
             show_log=False,
             rec_batch_num=6
@@ -129,64 +130,103 @@ class MarathiNewspaperTwoDimPipeline:
         doc = fitz.open(pdf_path)
         all_pdf_results = {}
 
+        # Start total timer
+        total_start_time = time.perf_counter()
+
         for page_num in range(len(doc)):
+
+            # Start page timer
+            page_start_time = time.perf_counter()
+
             page_key = f"page_{page_num + 1}"
             print(f"\n--- Processing {page_key.upper()} / {len(doc)} ---")
+
             page = doc[page_num]
-            
-            # Render full page to image workspace at high-contrast 300 DPI
+
+            # Render full page at 300 DPI
             zoom = 3.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
-            
-            img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.h, pix.w, 3))
+
+            img_np = np.frombuffer(
+                pix.samples, dtype=np.uint8
+            ).reshape((pix.h, pix.w, 3))
+
             high_res_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-            
-            # Fetch 2D grid block bounding coordinates
+
+            # Detect article grid
             grid_blocks = self._get_2d_layout_grid(high_res_bgr)
-            
-            # Sort blocks: Primary Top-to-Bottom, Secondary Left-to-Right
-            sorted_grid_blocks = sorted(grid_blocks, key=lambda b: (b[1] // 100, b[0]))
+
+            # Sort blocks
+            sorted_grid_blocks = sorted(
+                grid_blocks,
+                key=lambda b: (b[1] // 100, b[0])
+            )
+
             print(f"[Processing] Isolated {len(sorted_grid_blocks)} independent article segments.")
-            
+
             page_articles = []
             article_id_counter = 1
-            
+
             for (x1, y1, x2, y2) in sorted_grid_blocks:
-                # Crop specific local article cell grid zone
+
                 article_crop = high_res_bgr[y1:y2, x1:x2]
-                
+
                 if article_crop.size == 0:
                     continue
-                    
+
                 ocr_out = self.ocr_engine.ocr(article_crop, cls=False)
-                
+
                 if ocr_out and ocr_out[0]:
-                    # Sort detected text inside cell from Top to Bottom
-                    sorted_lines = sorted(ocr_out[0], key=lambda line: line[0][0][1])
-                    
-                    heading, paragraphs = self._separate_heading_and_paragraphs(sorted_lines)
-                    
-                    # If heading couldn't be extracted based on font scale, use the first sentence as a fallback
+
+                    sorted_lines = sorted(
+                        ocr_out[0],
+                        key=lambda line: line[0][0][1]
+                    )
+
+                    heading, paragraphs = self._separate_heading_and_paragraphs(
+                        sorted_lines
+                    )
+
                     if not heading and paragraphs:
                         words = paragraphs[0].split()
                         heading = " ".join(words[:5]) + "..."
-                    
+
                     if heading or paragraphs:
                         page_articles.append({
                             "article_id": article_id_counter,
                             "heading": heading,
                             "paragraphs": paragraphs
                         })
+
                         article_id_counter += 1
-                        
+
             all_pdf_results[page_key] = page_articles
-            
+
+            # End page timer
+            page_time = time.perf_counter() - page_start_time
+
+            print(
+                f"[Time] {page_key} processed in {page_time:.2f} seconds "
+                f"({len(page_articles)} articles)"
+            )
+
+        # End total timer
+        total_time = time.perf_counter() - total_start_time
+
         doc.close()
+
+        print("\n==============================")
+        print(f"Total pages processed : {len(all_pdf_results)}")
+        print(f"Total articles        : {sum(len(v) for v in all_pdf_results.values())}")
+        print(f"Total extraction time : {total_time:.2f} seconds")
+        print(f"Average time per page : {total_time / len(all_pdf_results):.2f} seconds")
+        print("==============================")
+
         return all_pdf_results
 
 if __name__ == "__main__":
-    INPUT_PDF = "newspaper_input.pdf"
+    INPUT_PDF = "Loksatta_Pune_20260714.pdf"
     OUTPUT_JSON = "extracted_articles.json"
     
     pipeline = MarathiNewspaperTwoDimPipeline()
