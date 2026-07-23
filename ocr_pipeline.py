@@ -226,7 +226,7 @@ class MarathiNewspaperTwoDimPipeline:
         return all_pdf_results
 
 if __name__ == "__main__":
-    INPUT_PDF = "Loksatta_Pune_20260714.pdf"
+    INPUT_PDF = "Loksatta_Pune_20260723.pdf"
     OUTPUT_JSON = "extracted_articles.json"
     
     pipeline = MarathiNewspaperTwoDimPipeline()
