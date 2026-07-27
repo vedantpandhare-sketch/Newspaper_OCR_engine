@@ -11,4 +11,6 @@ numpy==1.26.4
 # Optional: faster image ops / common utilities used by OCR stacks
 # (not required, but harmless if compatible)
 Pillow
-
+playwright
+pymongo
+dnspython
