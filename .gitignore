@@ -62,3 +62,8 @@ Desktop.ini
 credentials.json
 credentials_old.json
 token.json
+temp_downloads/
+temp_outputs/
+.env
+__pycache__/
+*.pyc

@@ -1,19 +1,25 @@
-import os
 import datetime
+import os
 from playwright.sync_api import sync_playwright
-from drive_utils import upload_file_to_drive
 
-# Replace with your actual Google Drive INPUT Folder ID
-INPUT_FOLDER_ID = "1fFMtXqlTyP7gZtJ0L39l1IcJE0Wh5vRf"
 TEMP_DIR = "./temp_downloads"
 
+# Optional Google Drive Input Folder ID (set if still using Drive backup)
+INPUT_FOLDER_ID = "1fFMtXqlTyP7gZtJ0L39l1IcJE0Wh5vRf"
 
-def scrape_and_upload():
+
+def run_scraper() -> str:
+    """Scrapes the newspaper PDF from tradingref.com and returns the local file
+
+    path.
+    """
     today = datetime.datetime.now()
     today_iso = today.strftime("%Y-%m-%d")  # Format: "2026-07-27"
 
     os.makedirs(TEMP_DIR, exist_ok=True)
-    local_pdf_path = os.path.join(TEMP_DIR, f"Loksatta_{today_iso}.pdf")
+    local_pdf_path = os.path.abspath(
+        os.path.join(TEMP_DIR, f"Loksatta_{today_iso}.pdf")
+    )
 
     print(f"[Scraper] Starting scrape process for date: {today_iso}")
 
@@ -23,17 +29,21 @@ def scrape_and_upload():
         page = context.new_page()
 
         print("[Scraper] Navigating to https://www.tradingref.com/...")
-        # domcontentloaded is faster/more reliable than waiting for full load
-        page.goto("https://www.tradingref.com/", timeout=60000, wait_until="domcontentloaded")
+        page.goto(
+            "https://www.tradingref.com/",
+            timeout=60000,
+            wait_until="domcontentloaded",
+        )
 
-        # Instead of networkidle (unreliable on pages with ads/analytics/polling),
-        # wait for the actual element we need to interact with.
         print("[Scraper] Waiting for date picker to be ready...")
         page.wait_for_selector("#datePicker", state="visible", timeout=30000)
 
         # 1. Date Selection via Flatpickr JS Instance
-        print(f"[Scraper] Setting publication date to {today_iso} via Flatpickr API...")
-        page.evaluate(f'''() => {{
+        print(
+            f"[Scraper] Setting publication date to {today_iso} via Flatpickr"
+            " API..."
+        )
+        page.evaluate(f"""() => {{
             const fp = document.querySelector("#datePicker");
             if (fp && fp._flatpickr) {{
                 fp._flatpickr.setDate("{today_iso}", true); // 'true' triggers onChange
@@ -42,9 +52,8 @@ def scrape_and_upload():
                 fp.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 fp.dispatchEvent(new Event('change', {{ bubbles: true }}));
             }}
-        }}''')
+        }}""")
 
-        # Short pause for dependent options to populate dynamically
         page.wait_for_timeout(1500)
 
         # 2. Select Language
@@ -85,16 +94,31 @@ def scrape_and_upload():
         context.close()
         browser.close()
 
-    print(f"[Success] PDF downloaded and saved locally to: '{local_pdf_path}'")
+    print(
+        f"[Success] PDF downloaded and saved locally to: '{local_pdf_path}'"
+    )
 
-    # 6. Upload PDF to Google Drive Input Folder
-    print("[System] Uploading scraped PDF to Google Drive Input folder...")
+    # 6. Optional: Backup to Google Drive (Non-blocking)
     try:
+        from drive_utils import upload_file_to_drive
+
+        print("[System] Uploading scraped PDF to Google Drive Input folder...")
         drive_file_id = upload_file_to_drive(local_pdf_path, INPUT_FOLDER_ID)
-        print(f"[Success] File uploaded to Drive successfully! File ID: {drive_file_id}")
+        print(
+            f"[Drive Success] File uploaded to Drive successfully! File ID:"
+            f" {drive_file_id}"
+        )
     except Exception as e:
-        print(f"[Error] Failed to upload PDF to Google Drive: {e}")
+        print(f"[Drive Warning] Skipped Drive upload or failed: {e}")
+
+    # CRITICAL: Return the file path string so main.py can pick it up
+    return local_pdf_path
+
+
+# Alias for backward compatibility
+def scrape_and_upload() -> str:
+    return run_scraper()
 
 
 if __name__ == "__main__":
-    scrape_and_upload()
+    run_scraper()
