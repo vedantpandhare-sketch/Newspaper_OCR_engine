@@ -5,6 +5,13 @@ import numpy as np
 import time
 import fitz  # PyMuPDF
 from paddleocr import PaddleOCR
+import datetime
+import json
+import os
+from drive_utils import upload_file_to_drive
+
+# Replace with your actual Google Drive Output Folder ID
+OUTPUT_FOLDER_ID = "1IkXvx4xZUKrvP1qnGqepGLi8whgOBPEA"
 
 class MarathiNewspaperTwoDimPipeline:
     def __init__(self):
@@ -226,8 +233,8 @@ class MarathiNewspaperTwoDimPipeline:
         return all_pdf_results
 
 if __name__ == "__main__":
-    INPUT_PDF = "Loksatta_Pune_20260723.pdf"
-    OUTPUT_JSON = "extracted_articles.json"
+    INPUT_PDF = "Loksatta_Pune_20260727.pdf"
+    OUTPUT_JSON = "27 july extracted_articles.json"
     
     pipeline = MarathiNewspaperTwoDimPipeline()
     

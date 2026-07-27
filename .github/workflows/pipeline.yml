@@ -1,0 +1,40 @@
+name: Automated Newspaper OCR Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Runs daily at 3:00 AM UTC (8:30 AM IST)
+  workflow_dispatch:      # Allows manual one-click runs from GitHub UI/Mobile
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System OCR Dependencies (Tesseract/Poppler if needed)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-mar poppler-utils
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Step 1 - Scrape & Upload to Drive Input
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        run: python scraper.py
+
+      - name: Step 2, 3 & 4 - Run OCR & Upload Output JSON to Drive
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        run: python ocr_pipeline.py
