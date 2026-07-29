@@ -1,57 +1,80 @@
-import json
 import os
-import re
-from datetime import datetime
-import pymongo
+import json
+import datetime
+import bson
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# MongoDB Configuration from .env or fallback
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://<username>:<password>@cluster.mongodb.net/")
+DB_NAME = os.getenv("MONGO_DB_NAME", "newspaper_ocr")
 
 
-def get_mongo_collection(collection_name: str):
-  """Connects to MongoDB Atlas and returns the requested collection."""
-  mongo_uri = os.environ.get("MONGO_URI")
-  if not mongo_uri:
-    raise ValueError(
-        "Missing 'MONGO_URI' environment variable! Set it in your terminal or"
-        " environment."
-    )
-
-  client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-  db = client["newspaper_ocr_db"]
-  collection = db[collection_name]
-  return client, collection
+def get_mongo_client():
+    """Initializes and returns a MongoDB client instance."""
+    return MongoClient(MONGO_URI)
 
 
-def save_raw_ocr_json(json_path: str) -> str:
-  """Reads an OCR output JSON file and inserts it into a date-named MongoDB collection.
+def get_today_collection_name():
+    """
+    Generates a dynamic collection name based on the current date.
+    Example output: '2026-07-29'
+    """
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    return f"{today_str}"
 
-  Example collection name: '2026-07-27'
-  """
-  if not os.path.exists(json_path):
-    raise FileNotFoundError(f"JSON output file not found: {json_path}")
 
-  with open(json_path, "r", encoding="utf-8") as f:
-    data = json.load(f)
+def get_mongo_collection(collection_name=None):
+    """
+    Returns the PyMongo collection object.
+    If no collection_name is provided, it dynamically defaults to today's date collection.
+    """
+    client = get_mongo_client()
+    db = client[DB_NAME]
+    
+    if not collection_name:
+        collection_name = get_today_collection_name()
 
-  # 1. Extract date from source_filename (e.g., "Loksatta_2026-07-27.pdf" -> "2026-07-27")
-  source_filename = data.get("source_filename", "")
-  date_match = re.search(r"\d{4}-\d{2}-\d{2}", source_filename)
+    # Returns strictly the PyMongo collection object (no tuples!)
+    return db[collection_name]
 
-  if date_match:
-    collection_name = date_match.group(0)  # Yields "2026-07-27"
-  else:
-    # Fallback to current date if not found in filename
-    collection_name = datetime.now().strftime("%Y-%m-%d")
 
-  # Optional prefix if you prefer: collection_name = f"articles_{collection_name}"
+def save_raw_ocr_json(json_file_path, collection_name=None):
+    """
+    Reads the OCR output JSON file and inserts it into MongoDB under a dynamic collection name.
+    Returns: (inserted_doc_id_str, collection_name_used)
+    """
+    if not os.path.exists(json_file_path):
+        raise FileNotFoundError(f"❌ JSON file not found at path: {json_file_path}")
 
-  # 2. Connect to the dynamic collection
-  client, collection = get_mongo_collection(collection_name)
+    # Determine dynamic collection name
+    if not collection_name:
+        collection_name = get_today_collection_name()
 
-  try:
-    result = collection.insert_one(data)
-    doc_id = str(result.inserted_id)
-    print(
-        f"[MongoDB] Inserted into collection '{collection_name}' | ID: {doc_id}"
-    )
-    return doc_id
-  finally:
-    client.close()
+    collection = get_mongo_collection(collection_name)
+
+    # Read OCR JSON content
+    with open(json_file_path, "r", encoding="utf-8") as f:
+        ocr_data = json.load(f)
+
+    # Add execution timestamp metadata
+    if isinstance(ocr_data, dict):
+        ocr_data["processed_at"] = datetime.datetime.utcnow().isoformat()
+        ocr_data["source_file"] = os.path.basename(json_file_path)
+
+    # Insert into dynamic daily collection
+    result = collection.insert_one(ocr_data)
+    doc_id_str = str(result.inserted_id)
+
+    print(f"✓ Saved OCR data to MongoDB collection '{collection_name}' with ID: {doc_id_str}")
+
+    # Return BOTH strings to pass smoothly into pipeingest.py
+    return doc_id_str, collection_name
+
+
+if __name__ == "__main__":
+    # Test script standalone
+    col_name = get_today_collection_name()
+    print(f"Today's dynamic collection name: {col_name}")
