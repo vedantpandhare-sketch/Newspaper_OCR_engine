@@ -15,18 +15,16 @@ class MarathiNewspaperTwoDimPipeline:
         print(
             "[System] Initializing Two-Dimensional Marathi Extraction Core..."
         )
-        # Optimized for CPU execution in headless environments
+        # "hi" is the standard language code for Devanagari script (Marathi/Hindi) in PaddleOCR
         self.ocr_engine = PaddleOCR(
-            use_angle_cls=False,
-            lang="devanagari",  # Marathi Devanagari script
-            use_gpu=False,
-            show_log=False,
+            use_angle_cls=True,
+            lang="mr",
             rec_batch_num=6,
+            # show_log=False
         )
 
     def _get_2d_layout_grid(self, high_res_bgr):
         """Slices the newspaper page both horizontally (into rows/stories) and
-
         vertically (into columns) to prevent overlapping articles from merging.
         """
         h, w, _ = high_res_bgr.shape
@@ -88,32 +86,42 @@ class MarathiNewspaperTwoDimPipeline:
         return final_grid_blocks
 
     def _separate_heading_and_paragraphs(self, sorted_lines):
-        """Differentiates headlines from body paragraphs using bounding box line
-
-        heights.
-        """
+        """Differentiates headlines from body paragraphs using bounding box line heights."""
         if not sorted_lines:
             return "", []
 
         line_heights = []
+        valid_lines = []
+
+        # Filter out invalid entries while preserving short Devanagari words/numbers
         for line in sorted_lines:
+            if not line or len(line) < 2 or not line[1]:
+                continue
+
+            text_candidate = str(line[1][0]).strip() if line[1][0] else ""
+            if not text_candidate:
+                continue
+
             bbox_coords = line[0]
+            if not bbox_coords or len(bbox_coords) < 4:
+                continue
+
             y_coords = [pt[1] for pt in bbox_coords]
             height = max(y_coords) - min(y_coords)
+
             line_heights.append(height)
+            valid_lines.append((line, text_candidate))
+
+        if not valid_lines:
+            return "", []
 
         median_height = np.median(line_heights) if line_heights else 20
-        headline_threshold = median_height * 1.4
+        headline_threshold = median_height * 1.35
 
         heading_parts = []
         paragraph_parts = []
 
-        for idx, line in enumerate(sorted_lines):
-            text_str = line[1][0].strip()
-
-            if len(text_str) <= 1:
-                continue
-
+        for idx, (line, text_str) in enumerate(valid_lines):
             if line_heights[idx] >= headline_threshold and not paragraph_parts:
                 heading_parts.append(text_str)
             else:
@@ -144,7 +152,7 @@ class MarathiNewspaperTwoDimPipeline:
             print(f"\n--- Processing {page_key.upper()} / {len(doc)} ---")
 
             page = doc[page_num]
-            zoom = 3.0  # 300 DPI high resolution
+            zoom = 2.0  # 200 DPI offers fast & highly accurate OCR recognition
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
@@ -167,30 +175,42 @@ class MarathiNewspaperTwoDimPipeline:
 
             for x1, y1, x2, y2 in sorted_grid_blocks:
                 article_crop = high_res_bgr[y1:y2, x1:x2]
-                if article_crop.size == 0:
+                if article_crop.size == 0 or article_crop.shape[0] < 15 or article_crop.shape[1] < 15:
                     continue
 
-                ocr_out = self.ocr_engine.ocr(article_crop, cls=False)
+                # Run PaddleOCR directly on crop
+                ocr_out = self.ocr_engine.ocr(article_crop)
 
                 if ocr_out and ocr_out[0]:
-                    sorted_lines = sorted(
-                        ocr_out[0], key=lambda line: line[0][0][1]
-                    )
-                    heading, paragraphs = (
-                        self._separate_heading_and_paragraphs(sorted_lines)
-                    )
+                    valid_ocr_lines = []
+                    for line in ocr_out[0]:
+                        if (
+                            line 
+                            and isinstance(line, (list, tuple)) 
+                            and len(line) >= 2 
+                            and line[0] 
+                            and len(line[0]) > 0
+                            and len(line[0][0]) > 1
+                        ):
+                            valid_ocr_lines.append(line)
 
-                    if not heading and paragraphs:
-                        words = paragraphs[0].split()
-                        heading = " ".join(words[:5]) + "..."
+                    if valid_ocr_lines:
+                        sorted_lines = sorted(
+                            valid_ocr_lines, key=lambda l: l[0][0][1]
+                        )
+                        heading, paragraphs = self._separate_heading_and_paragraphs(sorted_lines)
 
-                    if heading or paragraphs:
-                        page_articles.append({
-                            "article_id": article_id_counter,
-                            "heading": heading,
-                            "paragraphs": paragraphs,
-                        })
-                        article_id_counter += 1
+                        if not heading and paragraphs:
+                            words = paragraphs[0].split()
+                            heading = " ".join(words[:5]) + "..." if words else "Article"
+
+                        if heading or paragraphs:
+                            page_articles.append({
+                                "article_id": article_id_counter,
+                                "heading": heading,
+                                "paragraphs": paragraphs,
+                            })
+                            article_id_counter += 1
 
             all_pdf_results[page_key] = page_articles
             page_time = time.perf_counter() - page_start_time
@@ -198,7 +218,6 @@ class MarathiNewspaperTwoDimPipeline:
                 f"[Time] {page_key} processed in {page_time:.2f}s ({len(page_articles)} articles)"
             )
 
-            # Garbage collect per page to keep memory usage low on cloud runners
             gc.collect()
 
         total_time = time.perf_counter() - total_start_time
@@ -212,7 +231,6 @@ class MarathiNewspaperTwoDimPipeline:
         print(f"Total extraction time : {total_time:.2f} seconds")
         print("==============================")
 
-        # Wrap output with metadata for MongoDB
         return {
             "source_filename": filename,
             "processed_at": datetime.datetime.utcnow().isoformat(),
@@ -221,19 +239,15 @@ class MarathiNewspaperTwoDimPipeline:
         }
 
 
-# Global helper function for main.py integration
 def process_pdf_to_json(pdf_path: str) -> dict:
     pipeline = MarathiNewspaperTwoDimPipeline()
     return pipeline.process_pdf(pdf_path)
 
 
 if __name__ == "__main__":
-    # Local manual test execution
     sample_pdf = "Loksatta_Pune_20260727.pdf"
     if os.path.exists(sample_pdf):
         result = process_pdf_to_json(sample_pdf)
-        with open(
-            "extracted_articles_output.json", "w", encoding="utf-8"
-        ) as f:
+        with open("extracted_articles_output.json", "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=4)
         print("[Success] OCR test run complete!")

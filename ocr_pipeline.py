@@ -17,11 +17,18 @@ class MarathiNewspaperTwoDimPipeline:
     def __init__(self):
         print("[System] Initializing Two-Dimensional Marathi Extraction Core...")
         self.ocr_engine = PaddleOCR(
-            use_angle_cls=False, 
-            lang='devanagari', 
-            use_gpu=False, 
-            show_log=False,
-            rec_batch_num=6
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False, 
+            text_detection_model_name='PP-OCRv5_mobile_det',        # lightweight vs default 'server' det model
+            text_recognition_model_name='devanagari_PP-OCRv5_mobile_rec',  # must be pinned explicitly:
+            # once ANY model name is set, `lang=` is silently ignored, so we
+            # have to name the Marathi/devanagari recognizer ourselves or it
+            # falls back to a generic model that isn't tuned for this script
+            #use_gpu=False, 
+            #show_log=False,
+            text_recognition_batch_size=6,
+            cpu_threads=os.cpu_count() or 4,
         )
 
     def _get_2d_layout_grid(self, high_res_bgr):
@@ -175,19 +182,49 @@ class MarathiNewspaperTwoDimPipeline:
             page_articles = []
             article_id_counter = 1
 
+            # Build the list of valid crops first, keeping their grid coordinates
+            # aligned by index, so we can send ALL crops to the model in ONE call
+            # instead of one call per crop (which was the main source of overhead).
+            valid_crops = []
             for (x1, y1, x2, y2) in sorted_grid_blocks:
-
                 article_crop = high_res_bgr[y1:y2, x1:x2]
-
                 if article_crop.size == 0:
                     continue
+                valid_crops.append(article_crop)
 
-                ocr_out = self.ocr_engine.ocr(article_crop, cls=False)
+            print(f"  [OCR] Running batched OCR on {len(valid_crops)} segments...", flush=True)
+            batch_start = time.perf_counter()
 
-                if ocr_out and ocr_out[0]:
+            batch_results = self.ocr_engine.predict(valid_crops) if valid_crops else []
+
+            print(f"  [OCR] Batch complete ({time.perf_counter() - batch_start:.1f}s total, "
+                  f"{(time.perf_counter() - batch_start) / max(len(valid_crops), 1):.2f}s/segment avg)",
+                  flush=True)
+
+            for page_res in batch_results:
+
+                # New PaddleOCR 3.x returns one result dict per image,
+                # e.g. {'rec_texts': [...], 'rec_polys': [...], 'rec_scores': [...]}
+                # instead of the old list of [bbox, (text, score)] pairs.
+                rec_texts = page_res.get("rec_texts", [])
+                rec_polys = page_res.get(
+                    "rec_polys", page_res.get("dt_polys", [])
+                )
+                rec_scores = page_res.get(
+                    "rec_scores", [1.0] * len(rec_texts)
+                )
+
+                if rec_texts:
+
+                    # Rebuild the old-style line structure: [bbox, (text, score)]
+                    # so the rest of the pipeline doesn't need to change.
+                    formatted_lines = [
+                        [poly, (text, score)]
+                        for poly, text, score in zip(rec_polys, rec_texts, rec_scores)
+                    ]
 
                     sorted_lines = sorted(
-                        ocr_out[0],
+                        formatted_lines,
                         key=lambda line: line[0][0][1]
                     )
 
@@ -232,14 +269,38 @@ class MarathiNewspaperTwoDimPipeline:
 
         return all_pdf_results
 
+
+# --- Module-level convenience API used by main.py / the Streamlit app ---
+#
+# main.py does: from ocr_pipeline import process_pdf_to_json
+# We keep a single cached pipeline instance so the (slow, model-loading)
+# constructor only runs once per process, not once per PDF/click.
+_pipeline_singleton = None
+
+
+def _get_pipeline():
+    global _pipeline_singleton
+    if _pipeline_singleton is None:
+        _pipeline_singleton = MarathiNewspaperTwoDimPipeline()
+    return _pipeline_singleton
+
+
+def process_pdf_to_json(pdf_path):
+    """
+    Convenience wrapper: runs the full 2D article-extraction pipeline on a
+    single PDF and returns the result as a plain dict (JSON-serializable),
+    e.g. {"page_1": [{"article_id": 1, "heading": ..., "paragraphs": [...]}]}.
+    """
+    pipeline = _get_pipeline()
+    return pipeline.process_pdf(pdf_path)
+
+
 if __name__ == "__main__":
-    INPUT_PDF = "Loksatta_Pune_20260727.pdf"
-    OUTPUT_JSON = "27 july extracted_articles.json"
-    
-    pipeline = MarathiNewspaperTwoDimPipeline()
-    
+    INPUT_PDF = "test.pdf"
+    OUTPUT_JSON = "test_extracted_articles.json"
+
     if os.path.exists(INPUT_PDF):
-        extracted_data = pipeline.process_pdf(INPUT_PDF)
+        extracted_data = process_pdf_to_json(INPUT_PDF)
         
         with open(OUTPUT_JSON, "w", encoding="utf-8") as json_file:
             json.dump(extracted_data, json_file, ensure_ascii=False, indent=4)

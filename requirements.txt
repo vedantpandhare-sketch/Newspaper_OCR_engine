@@ -1,7 +1,7 @@
 # Core deps
 torch==2.6.0
 numpy
-fitz #pymupdf
+pymupdf
 bson
 opencv-python
 pdf2image

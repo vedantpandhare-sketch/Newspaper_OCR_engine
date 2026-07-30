@@ -3,11 +3,17 @@ import os
 import sys
 import json
 import time
+import asyncio
 import streamlit as st
 
 # Environment setup
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+# --- FIX FOR PLAYWRIGHT + STREAMLIT ON WINDOWS ---
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+# --------------------------------------------------
 
 # Ensure local project path is accessible
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +22,7 @@ if PROJECT_ROOT not in sys.path:
 
 # Core imports
 from scraper import run_scraper
-from ocr_pipeline_updated import process_pdf_to_json
+from ocr_pipeline import process_pdf_to_json
 from db_mongo import save_raw_ocr_json
 
 # Configure Streamlit Page
@@ -125,7 +131,6 @@ def run_pipeline_with_ui(status_box, log_area, progress_bar, manual_pdf_path=Non
     except Exception as e:
         progress_bar.progress(0)
         status_box.error(f"❌ Pipeline Execution Failed: {str(e)}")
-        log(f"\n❌ Pipeline Error: {str(e)}")
         return False, None
 
 

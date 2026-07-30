@@ -128,7 +128,7 @@ def run_scraper() -> str:
         # 2. Select Language
         print("[Scraper] Selecting language: Marathi...")
         lang_select = page.get_by_label("Language")
-        lang_select.wait_for(state="visible", timeout=10000)
+        lang_select.wait_for(state="visible", timeout=30000)
         lang_select.select_option(value="marathi")
 
         page.wait_for_timeout(1000)
