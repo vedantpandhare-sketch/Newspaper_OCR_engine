@@ -1,10 +1,12 @@
+import json
 import os
 import re
+import time
 import uuid
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone
+from pinecone.exceptions import PineconeApiException
+from pymongo import MongoClient
 
 # ------------------------------------
 # 1. Load Environment Variables
@@ -15,52 +17,96 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "newspaper_ocr_db")
 
-INDEX_NAME = "test"  # BAAI/bge-m3 produces 1024-dimensional vectors
+INDEX_NAME = "test"  # Must be an index configured with Integrated Inference
+NAMESPACE = "__default__"
 
 if not PINECONE_API_KEY or not MONGO_URI:
     raise ValueError("Missing PINECONE_API_KEY or MONGO_URI in .env file.")
 
-# ------------------------------------
-# 2. Text Chunking Function
-# ------------------------------------
-def split_text(text, chunk_size=700, overlap=100):
-    """Split text into overlapping chunks."""
-    chunks = []
-    start = 0
 
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
+# ------------------------------------
+# 2. Text Chunking Function (Word-Aware)
+# ------------------------------------
+def split_text_smart(
+    text: str, chunk_size: int = 700, overlap: int = 100
+) -> list[str]:
+    """Splits text into overlapping chunks on whitespace boundaries."""
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for word in words:
+        word_len = len(word) + 1
+        if current_length + word_len > chunk_size and current_chunk:
+            chunks.append(" ".join(current_chunk))
+            overlap_words = []
+            overlap_len = 0
+            for w in reversed(current_chunk):
+                if overlap_len + len(w) + 1 <= overlap:
+                    overlap_words.insert(0, w)
+                    overlap_len += len(w) + 1
+                else:
+                    break
+            current_chunk = overlap_words
+            current_length = overlap_len
+
+        current_chunk.append(word)
+        current_length += word_len
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
 
     return chunks
 
-# ------------------------------------
-# 3. Initialize Embedding Model & Pinecone
-# ------------------------------------
-print("[Model] Loading BAAI/bge-m3 embedding model...")
-model = SentenceTransformer(
-    "BAAI/bge-m3",
-    trust_remote_code=True
-)
 
+# ------------------------------------
+# 3. Upsert One Batch with Retry Logic
+# ------------------------------------
+def upsert_with_retry(
+    index, namespace, batch, max_retries=6, base_delay=20
+):
+    """Sends raw text records to Pinecone's server-side embedding engine with rate-limit handling."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            index.upsert_records(namespace=namespace, records=batch)
+            return
+        except PineconeApiException as e:
+            is_rate_limited = getattr(e, "status", None) == 429
+
+            if is_rate_limited and attempt < max_retries:
+                wait = base_delay * attempt
+                print(
+                    f"Rate limited by server-side model, waiting {wait}s (retry {attempt}/{max_retries})..."
+                )
+                time.sleep(wait)
+                continue
+
+            raise
+
+
+# ------------------------------------
+# 4. Connect to Pinecone & MongoDB
+# ------------------------------------
 print("[Pinecone] Connecting to Pinecone...")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
 
-# ------------------------------------
-# 4. Connect to MongoDB & Select Latest Dated Collection
-# ------------------------------------
 print(f"[MongoDB] Connecting to database '{MONGO_DB_NAME}'...")
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DB_NAME]
 
-all_collections = [c for c in db.list_collection_names() if not c.startswith("system.")]
+all_collections = [
+    c for c in db.list_collection_names() if not c.startswith("system.")
+]
 
 if not all_collections:
     raise ValueError(f"No collections found inside database '{MONGO_DB_NAME}'!")
 
-# Filter for dated collections starting with digits (e.g. '2026-07-27')
+# Automatically pick the latest collection (e.g. '2026-08-14')
 date_collections = [c for c in all_collections if re.match(r"^\d", c)]
 
 if date_collections:
@@ -68,33 +114,34 @@ if date_collections:
     latest_collection_name = date_collections[-1]
 else:
     filtered = [c for c in all_collections if c != "extracted_articles"]
-    if filtered:
-        filtered.sort()
-        latest_collection_name = filtered[-1]
-    else:
-        latest_collection_name = sorted(all_collections)[-1]
+    latest_collection_name = (
+        sorted(filtered)[-1] if filtered else sorted(all_collections)[-1]
+    )
 
-print(f"[MongoDB] Target Collection selected -> '{latest_collection_name}'")
+print(f"[MongoDB] Selected Target Collection -> '{latest_collection_name}'")
 
 target_collection = db[latest_collection_name]
 mongo_docs = list(target_collection.find({}))
-print(f"[MongoDB] Retrieved {len(mongo_docs)} documents from '{latest_collection_name}'.")
+print(
+    f"[MongoDB] Retrieved {len(mongo_docs)} documents from '{latest_collection_name}'."
+)
 
 # ------------------------------------
-# 5. Extract Text & Generate Embeddings
+# 5. Extract Text & Build Record Objects
 # ------------------------------------
-vectors = []
+records = []
 
 for doc in mongo_docs:
-    # 1. Grab pages array or dict
+    extraction_date = doc.get(
+        "extraction_date", doc.get("date", latest_collection_name)
+    )
+
     pages_data = doc.get("pages", doc.get("data", doc))
 
-    # Normalize pages_data into an iterable list of page items
     pages_list = []
     if isinstance(pages_data, list):
         pages_list = pages_data
     elif isinstance(pages_data, dict):
-        # Convert dict {"page_1": [...]} to list format
         for k, v in pages_data.items():
             pages_list.append({"page_key": k, "content": v})
 
@@ -102,28 +149,32 @@ for doc in mongo_docs:
         page_number = idx
         articles = []
 
-        # Case A: page_item is dict like {"page": 1, "articles": [...]}
         if isinstance(page_item, dict):
             if "page" in page_item and isinstance(page_item["page"], int):
                 page_number = page_item["page"]
 
-            if "articles" in page_item and isinstance(page_item["articles"], list):
+            if "articles" in page_item and isinstance(
+                page_item["articles"], list
+            ):
                 articles = page_item["articles"]
-            elif "content" in page_item and isinstance(page_item["content"], list):
+            elif "content" in page_item and isinstance(
+                page_item["content"], list
+            ):
                 articles = page_item["content"]
             else:
-                # Check for "page_1", "page_2" internal keys
                 for k, v in page_item.items():
                     if k.startswith("page_") and isinstance(v, list):
-                        page_number = int(k.replace("page_", "")) if k.replace("page_", "").isdigit() else page_number
+                        page_number = (
+                            int(k.replace("page_", ""))
+                            if k.replace("page_", "").isdigit()
+                            else page_number
+                        )
                         articles = v
                         break
 
-        # Case B: page_item is directly a list of articles
         elif isinstance(page_item, list):
             articles = page_item
 
-        # Extract articles from page
         for article in articles:
             if not isinstance(article, dict):
                 continue
@@ -131,47 +182,50 @@ for doc in mongo_docs:
             heading = article.get("heading", article.get("title", ""))
             paragraphs = article.get("paragraphs", article.get("content", []))
 
-            if isinstance(paragraphs, list):
-                body_text = "\n".join([str(p) for p in paragraphs if p])
-            else:
-                body_text = str(paragraphs)
-
+            body_text = (
+                "\n".join([str(p) for p in paragraphs if p])
+                if isinstance(paragraphs, list)
+                else str(paragraphs)
+            )
             full_text = f"{heading}\n\n{body_text}".strip()
 
             if not full_text:
                 continue
 
-            chunks = split_text(full_text, chunk_size=700, overlap=100)
+            chunks = split_text_smart(full_text, chunk_size=700, overlap=100)
 
             for chunk_id, chunk in enumerate(chunks):
-                embedding = model.encode(chunk, normalize_embeddings=True).tolist()
-
-                vectors.append({
-                    "id": str(uuid.uuid4()),
-                    "values": embedding,
-                    "metadata": {
-                        "mongo_id": str(doc.get("_id", "")),
-                        "collection_source": latest_collection_name,
+                # Build the record matching your exact target dictionary schema
+                records.append(
+                    {
+                        "_id": str(uuid.uuid4()),
+                        "text": chunk,
                         "page": page_number,
-                        "article_id": str(article.get("article_id", "")),
-                        "heading": str(heading)[:500],
                         "chunk": chunk_id,
-                        "text": chunk
+                        "date": extraction_date,
                     }
-                })
+                )
 
 # ------------------------------------
-# 6. Upload Vector Embeddings to Pinecone
+# 6. Upload Records to Pinecone
 # ------------------------------------
-print(f"[Pinecone] Generated {len(vectors)} vector chunks ready for upload.")
+print(f"[Pinecone] Built {len(records)} record chunks for server-side embedding...")
 
-if len(vectors) == 0:
-    print("[Warning] No chunks generated! Check document structure.")
+if len(records) == 0:
+    print("[Warning] No records generated! Check document structure.")
 else:
-    BATCH_SIZE = 100
-    for i in range(0, len(vectors), BATCH_SIZE):
-        batch = vectors[i:i + BATCH_SIZE]
-        index.upsert(vectors=batch)
-        print(f"Uploaded {min(i + BATCH_SIZE, len(vectors))}/{len(vectors)} chunks...")
+    BATCH_SIZE = 96  # Pinecone integrated-embedding record limit
+    SLEEP_BETWEEN_BATCHES = 5  # Keeps execution well under token limits
+
+    for i in range(0, len(records), BATCH_SIZE):
+        batch = records[i : i + BATCH_SIZE]
+
+        upsert_with_retry(index, NAMESPACE, batch)
+
+        print(
+            f"Uploaded {min(i + BATCH_SIZE, len(records))}/{len(records)} records..."
+        )
+
+        time.sleep(SLEEP_BETWEEN_BATCHES)
 
     print("Upload Completed Successfully!")
