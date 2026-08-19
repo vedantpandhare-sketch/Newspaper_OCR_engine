@@ -1,9 +1,8 @@
-# main.py
+import asyncio
+import json
 import os
 import sys
-import json
 import time
-import asyncio
 import streamlit as st
 
 # Environment setup
@@ -21,19 +20,27 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # Core imports
-from scraper import run_scraper
-from ocr_pipeline import process_pdf_to_json
 from db_mongo import save_raw_ocr_json
+from ocr_pipeline import process_pdf_to_json
+from pipeingest import ingest_json_to_pinecone
+from scraper import run_scraper
+
+# Index Mapping Configuration
+INDEX_MAPPING = {
+    "loksatta": "loksttapune",
+    "lokmat": "lokmatpune",
+}
 
 # Configure Streamlit Page
 st.set_page_config(
     page_title="Automated Newspaper OCR & Vector Pipeline",
     page_icon="📰",
-    layout="wide"
+    layout="wide",
 )
 
 # Custom Styling
-st.markdown("""
+st.markdown(
+    """
     <style>
     .stButton>button {
         width: 100%;
@@ -48,11 +55,15 @@ st.markdown("""
         color: white;
     }
     </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-def run_pipeline_with_ui(status_box, log_area, progress_bar, manual_pdf_path=None):
-    """Executes the full pipeline and updates the Streamlit interface in real time."""
+def run_pipeline_with_ui(
+    status_box, log_area, progress_bar, manual_pdf_path=None, force_reocr=False
+):
+    """Executes the pipeline in 4 distinct phases across ALL newspapers."""
     logs = []
 
     def log(msg):
@@ -60,111 +71,177 @@ def run_pipeline_with_ui(status_box, log_area, progress_bar, manual_pdf_path=Non
         log_area.code("\n".join(logs), language="bash")
 
     try:
-        # Step 1: Scraper Step
-        status_box.info("⏳ [1/4] Running Newspaper Scraper...")
+        log("=" * 60)
+        log("🚀 BATCH MULTI-NEWSPAPER OCR & DEDICATED VECTOR PIPELINE")
+        log("=" * 60)
+
+        # ---------------------------------------------------------
+        # PHASE 1: SCRAPE ALL NEWSPAPERS
+        # ---------------------------------------------------------
+        status_box.info("⏳ [Phase 1/4] Running Scraper for all newspapers...")
         progress_bar.progress(10)
-        log("=" * 60)
-        log("🚀 AUTOMATED NEWSPAPER SCRAPER, OCR & PINECONE PIPELINE")
-        log("=" * 60)
-        log("\n[1/4] Initiating Scraper step...")
+        log("\n[Phase 1/4] Downloading all target newspapers...")
 
         if manual_pdf_path and os.path.exists(manual_pdf_path):
-            pdf_path = manual_pdf_path
-            log(f"✓ Using local specified PDF path: {pdf_path}")
+            pdf_paths = [manual_pdf_path]
+            log(f"✓ Using local specified PDF path: {manual_pdf_path}")
         else:
-            pdf_path = run_scraper()
-            if not pdf_path or not os.path.exists(pdf_path):
-                fallback_path = "temp_downloads/Loksatta_2026-07-29.pdf"
-                if os.path.exists(fallback_path):
-                    pdf_path = fallback_path
-                    log(f"⚠️ Scraper fallback used: {pdf_path}")
-                else:
-                    raise FileNotFoundError("❌ Scraper failed and fallback PDF was not found.")
+            pdf_paths = run_scraper()
 
-        log(f"✓ Target PDF: {os.path.basename(pdf_path)}")
+            if isinstance(pdf_paths, str):
+                pdf_paths = [pdf_paths]
+
+            if not pdf_paths:
+                fallback_path = "temp_downloads/Loksatta_2026-08-19.pdf"
+                if os.path.exists(fallback_path):
+                    pdf_paths = [fallback_path]
+                    log(f"⚠️ Scraper fallback used: {fallback_path}")
+                else:
+                    raise FileNotFoundError(
+                        "❌ Scraper failed to retrieve any PDFs and no fallback was found."
+                    )
+
+        log(f"✓ Total PDFs acquired for processing: {len(pdf_paths)}")
+        for idx, path in enumerate(pdf_paths, start=1):
+            log(f"   ├─ PDF #{idx}: {os.path.basename(path)}")
+
         progress_bar.progress(25)
 
-        # Step 2: PaddleOCR Extraction
-        status_box.info("⏳ [2/4] Running PaddleOCR Processing...")
-        log(f"\n[2/4] Running PaddleOCR Pipeline on {pdf_path}...")
+        # ---------------------------------------------------------
+        # PHASE 2: OCR EXTRACTION ON ALL PAPERS FIRST
+        # ---------------------------------------------------------
+        status_box.info("⏳ [Phase 2/4] Running PaddleOCR on ALL papers...")
+        log("\n[Phase 2/4] Executing PaddleOCR extraction across all PDFs...")
 
-        output_json_path = pdf_path.replace(".pdf", "_ocr.json")
+        ocr_records = []
 
-        if os.path.exists(output_json_path):
-            log(f"✓ Found existing cached OCR JSON: {os.path.basename(output_json_path)}")
-        else:
-            ocr_json_data = process_pdf_to_json(pdf_path)
-            with open(output_json_path, "w", encoding="utf-8") as f:
-                json.dump(ocr_json_data, f, ensure_ascii=False, indent=2)
-            log(f"✓ Saved backup OCR JSON: {os.path.basename(output_json_path)}")
+        for idx, pdf_path in enumerate(pdf_paths, start=1):
+            paper_name = os.path.basename(pdf_path).split("_")[0]
+            output_json_path = pdf_path.replace(".pdf", "_ocr.json")
 
-        progress_bar.progress(55)
+            log(f"\n► [{idx}/{len(pdf_paths)}] OCR Extraction for {paper_name}...")
 
-        # Step 3: MongoDB Atlas Daily Ingestion
-        status_box.info("⏳ [3/4] Uploading Raw JSON to MongoDB Atlas...")
-        log("\n[3/4] Uploading Raw JSON to MongoDB Atlas...")
+            if os.path.exists(output_json_path) and not force_reocr:
+                log(f"   └─ Found cached OCR file: {os.path.basename(output_json_path)}")
+            else:
+                if force_reocr and os.path.exists(output_json_path):
+                    log("   └─ Force Re-OCR enabled. Overwriting existing cached JSON...")
 
-        doc_id, collection_name = save_raw_ocr_json(output_json_path)
-        log(f"✓ Saved in MongoDB!")
-        log(f"  ├─ Dynamic Collection: '{collection_name}'")
-        log(f"  └─ Document ID: '{doc_id}'")
+                ocr_json_data = process_pdf_to_json(pdf_path)
+                with open(output_json_path, "w", encoding="utf-8") as f:
+                    json.dump(ocr_json_data, f, ensure_ascii=False, indent=2)
+                log(f"   └─ OCR complete! Saved {os.path.basename(output_json_path)}")
+
+            ocr_records.append({
+                "paper_name": paper_name,
+                "pdf_path": pdf_path,
+                "json_path": output_json_path,
+            })
+
+        progress_bar.progress(50)
+
+        # ---------------------------------------------------------
+        # PHASE 3: MONGODB UPLOAD FOR ALL PAPERS
+        # ---------------------------------------------------------
+        status_box.info("⏳ [Phase 3/4] Uploading raw JSONs to MongoDB...")
+        log("\n[Phase 3/4] Uploading all extracted JSONs to MongoDB Atlas...")
+
+        for idx, record in enumerate(ocr_records, start=1):
+            paper_name = record["paper_name"]
+            json_path = record["json_path"]
+
+            log(f"\n► [{idx}/{len(ocr_records)}] Saving {paper_name} to MongoDB...")
+            doc_id, collection_name = save_raw_ocr_json(json_path)
+            log(f"   ├─ Collection: '{collection_name}'")
+            log(f"   └─ Document ID: '{doc_id}'")
+
+            record["doc_id"] = doc_id
+            record["collection_name"] = collection_name
 
         progress_bar.progress(75)
 
-        # Step 4: Chunking, Local Embeddings (SentenceTransformers), & Pinecone Upsert
-        status_box.info("⏳ [4/4] Generating Local BGE-M3 Embeddings & Ingesting to Pinecone...")
-        log("\n[4/4] Generating Embeddings & Ingesting to Pinecone...")
+        # ---------------------------------------------------------
+        # PHASE 4: PINECONE VECTOR INGESTION TO DEDICATED INDEXES
+        # ---------------------------------------------------------
+        status_box.info("⏳ [Phase 4/4] Ingesting vectors to dedicated Pinecone indexes...")
+        log("\n[Phase 4/4] Ingesting vectors into separate Pinecone indexes...")
 
-        from pipeingest import upsert_collection_to_pinecone
+        summary_results = []
 
-        vector_count = upsert_collection_to_pinecone(doc_id=doc_id, collection_name=collection_name)
-        log(f"✓ Pinecone Ingestion Complete! ({vector_count} vector chunks saved)")
+        for idx, record in enumerate(ocr_records, start=1):
+            paper_name = record["paper_name"]
+            json_path = record["json_path"]
+            
+            # Resolve target Pinecone index name
+            target_index = INDEX_MAPPING.get(paper_name.lower(), f"{paper_name.lower()}-index")
+
+            log(f"\n► [{idx}/{len(ocr_records)}] Vectorizing {paper_name} -> Index: '{target_index}'...")
+
+            vector_count = ingest_json_to_pinecone(
+                json_path=json_path,
+                index_name=target_index
+            )
+
+            log(f"   └─ Ingested {vector_count} vector chunks into '{target_index}'.")
+
+            summary_results.append({
+                "paper": paper_name,
+                "index": target_index,
+                "collection": record["collection_name"],
+                "vectors": vector_count
+            })
 
         progress_bar.progress(100)
         log("\n" + "=" * 60)
-        log("🎉 FULL PIPELINE COMPLETED SUCCESSFULLY!")
+        log("🎉 ALL NEWSPAPERS PROCESSED SUCCESSFULLY!")
+        for res in summary_results:
+            log(f" ├─ {res['paper']}: {res['vectors']} vectors -> Index '{res['index']}'")
         log("=" * 60)
 
-        status_box.success(f"🎉 Pipeline Completed! Saved {vector_count} vector chunks in '{collection_name}'.")
-        return True, collection_name
+        status_box.success(f"🎉 Pipeline Completed! Processed {len(summary_results)} paper(s).")
+        return True, summary_results
 
     except Exception as e:
         progress_bar.progress(0)
         status_box.error(f"❌ Pipeline Execution Failed: {str(e)}")
-        return False, None
+        return False, []
 
 
 # --- STREAMLIT UI ---
-st.title("📰 Newspaper OCR & Vector Ingestion Engine")
-st.caption("PDF Ingestion → PaddleOCR → Dynamic MongoDB Storage → SentenceTransformer BGE-M3 Embeddings → Pinecone")
+st.title("📰 Newspaper OCR & Dedicated Multi-Vector Engine")
+st.caption(
+    "Automated Multi-Paper Scraper → Sequential OCR → MongoDB Storage → Targeted Pinecone Indexes"
+)
 
 col_left, col_right = st.columns([1, 2])
 
 with col_left:
     st.subheader("⚙️ Control Panel")
-    
+
+    force_reocr_check = st.checkbox("Force Re-run OCR (Ignore cached JSONs)", value=False)
     run_btn = st.button("🚀 Run Full Pipeline", use_container_width=True)
 
-    with st.expander("🛠️ File Settings"):
+    with st.expander("🛠️ Single File Override"):
         manual_path_input = st.text_input(
-            "Target PDF Path", 
-            value="temp_downloads/Loksatta_2026-07-29.pdf"
+            "Target PDF Path (Optional)", value=""
         )
 
     st.markdown("---")
     st.markdown("### 📋 Pipeline Flow")
     st.markdown("""
-    1. **Scrape:** Fetch PDF newspaper file.
-    2. **OCR:** PaddleOCR extracts text blocks and headlines.
-    3. **MongoDB:** Archives output into a dynamic daily collection.
-    4. **Pinecone:** Chunks text and generates `BAAI/bge-m3` vectors locally.
+    1. **Scrape:** Fetch all target newspapers (`Loksatta`, `Lokmat`).
+    2. **Batch OCR:** Run PaddleOCR on **all** downloaded PDFs.
+    3. **MongoDB:** Store raw JSON files into daily collections.
+    4. **Pinecone:** Chunk text and route to dedicated indexes (`loksttapune`, `lokmatpune`).
     """)
 
 with col_right:
     st.subheader("📊 Execution Monitor")
 
     status_box = st.empty()
-    status_box.info("System Ready. Click 'Run Full Pipeline' to initiate processing.")
+    status_box.info(
+        "System Ready. Click 'Run Full Pipeline' to process all newspapers."
+    )
 
     progress_bar = st.progress(0)
 
@@ -172,49 +249,58 @@ with col_right:
     log_area = st.empty()
     log_area.code("Logs will appear here during execution...", language="text")
 
-# Trigger Run
+# Trigger Pipeline Execution
 if run_btn:
-    success, col_used = run_pipeline_with_ui(
-        status_box, 
-        log_area, 
-        progress_bar, 
-        manual_pdf_path=manual_path_input.strip() if manual_path_input else None
+    success, summary = run_pipeline_with_ui(
+        status_box,
+        log_area,
+        progress_bar,
+        manual_pdf_path=manual_path_input.strip() if manual_path_input else None,
+        force_reocr=force_reocr_check,
     )
     if success:
         st.balloons()
 
 st.markdown("---")
 
-# Vector Search Interface with SentenceTransformers
+# Vector Search Interface
 st.subheader("🔍 Query Pinecone Vector Index")
 with st.expander("Perform Search Query"):
+    selected_paper = st.selectbox("Select Target Paper / Index", options=["Loksatta (loksttapune)", "Lokmat (lokmatpune)"])
     search_query = st.text_input("Enter search phrase or keyword:")
+
     if st.button("Search Vector DB") and search_query:
         try:
-            from sentence_transformers import SentenceTransformer
             from pinecone import Pinecone
+            from sentence_transformers import SentenceTransformer
 
-            st.info("Encoding query via SentenceTransformer...")
+            target_idx_name = "loksttapune" if "Loksatta" in selected_paper else "lokmatpune"
+
+            st.info(f"Encoding query & searching '{target_idx_name}'...")
             model = SentenceTransformer("BAAI/bge-m3", trust_remote_code=True)
-            query_vector = model.encode(search_query, normalize_embeddings=True).tolist()
+            query_vector = model.encode(
+                search_query, normalize_embeddings=True
+            ).tolist()
 
             pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-            index = pc.Index(os.getenv("PINECONE_INDEX_NAME", "test"))
+            index = pc.Index(target_idx_name)
 
             results = index.query(
-                vector=query_vector,
-                top_k=3,
-                include_metadata=True
+                vector=query_vector, top_k=5, include_metadata=True
             )
 
             matches = results.get("matches", [])
             if not matches:
-                st.warning("No matching vectors found in index.")
+                st.warning(f"No matching vectors found in index '{target_idx_name}'.")
             else:
                 for idx, match in enumerate(matches):
-                    st.markdown(f"**Match #{idx+1}** (Similarity: `{match['score']:.4f}`) - Page {match['metadata'].get('page', 'N/A')}")
+                    st.markdown(
+                        f"**Match #{idx+1}** (Similarity: `{match['score']:.4f}`) - Page {match['metadata'].get('page', 'N/A')}"
+                    )
                     st.write(match["metadata"].get("text", ""))
-                    st.caption(f"Headline: {match['metadata'].get('heading', 'N/A')} | Collection: {match['metadata'].get('collection_source', 'N/A')}")
+                    st.caption(
+                        f"Date: {match['metadata'].get('date', 'N/A')} | Chunk ID: {match['metadata'].get('chunk', 'N/A')}"
+                    )
                     st.markdown("---")
 
         except Exception as search_err:

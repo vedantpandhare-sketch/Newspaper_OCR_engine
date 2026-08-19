@@ -13,6 +13,24 @@ TEMP_DIR = "./temp_downloads"
 COOKIE_FILE = "./temp_downloads/cloudflare_cookies.json"
 INPUT_FOLDER_ID = "1fFMtXqlTyP7gZtJ0L39l1IcJE0Wh5vRf"
 
+# List of newspapers to scrape dynamically
+PAPERS_CONFIG = [
+    {
+        "name": "Loksatta",
+        "language": "marathi",
+        "newspaper": "Loksatta",
+        "edition": "Pune",
+        "filename_prefix": "Loksatta",
+    },
+    {
+        "name": "Lokmat",
+        "language": "marathi",
+        "newspaper": "Lokmat",
+        "edition": "Pune main",
+        "filename_prefix": "Lokmat",
+    },
+]
+
 
 def apply_stealth(page):
     """Applies stealth evasion to Playwright page safely."""
@@ -42,13 +60,21 @@ def auto_solve_turnstile(page):
             return True
 
         for frame in page.frames:
-            if "cloudflare" in frame.url or "challenges" in frame.url or "turnstile" in frame.url:
+            if (
+                "cloudflare" in frame.url
+                or "challenges" in frame.url
+                or "turnstile" in frame.url
+            ):
                 try:
-                    box_locator = frame.locator("input[type='checkbox'], #challenge-stage, .ctp-checkbox-label").first
+                    box_locator = frame.locator(
+                        "input[type='checkbox'], #challenge-stage, .ctp-checkbox-label"
+                    ).first
                     if box_locator.is_visible(timeout=2000):
                         box = box_locator.bounding_box()
                         if box:
-                            print("[Scraper] Turnstile checkbox located. Executing human-like click...")
+                            print(
+                                "[Scraper] Turnstile checkbox located. Executing human-like click..."
+                            )
                             target_x = box["x"] + random.uniform(8, 18)
                             target_y = box["y"] + random.uniform(8, 18)
 
@@ -56,7 +82,9 @@ def auto_solve_turnstile(page):
                             page.wait_for_timeout(random.randint(300, 600))
                             page.mouse.click(target_x, target_y)
 
-                            print("[Scraper] Clicked Turnstile checkbox. Waiting for verification...")
+                            print(
+                                "[Scraper] Clicked Turnstile checkbox. Waiting for verification..."
+                            )
                             page.wait_for_timeout(4000)
                             return True
                 except Exception:
@@ -67,17 +95,104 @@ def auto_solve_turnstile(page):
     return False
 
 
-def run_scraper() -> str:
-    """Scrapes the newspaper PDF with stealth evasion."""
+def select_dropdown_option(select_locator, target_text: str):
+    """
+    Robustly selects an option from a dropdown locator matching either value,
+    label, or case-insensitive text.
+    """
+    select_locator.wait_for(state="visible", timeout=15000)
+
+    # 1. Try exact label match
+    try:
+        select_locator.select_option(label=target_text)
+        return
+    except Exception:
+        pass
+
+    # 2. Try exact value match
+    try:
+        select_locator.select_option(value=target_text)
+        return
+    except Exception:
+        pass
+
+    # 3. Fallback: Search all options case-insensitively
+    options = select_locator.locator("option").all()
+    for opt in options:
+        opt_val = opt.get_attribute("value") or ""
+        opt_text = opt.text_content() or ""
+        if (
+            target_text.lower() in opt_val.lower()
+            or target_text.lower() in opt_text.lower()
+        ):
+            select_locator.select_option(value=opt_val)
+            return
+
+    raise ValueError(f"Could not find matching option for '{target_text}' in dropdown.")
+
+
+def download_paper(page, paper_cfg: dict, today_iso: str) -> str:
+    """Fills out form controls and downloads a single newspaper PDF."""
+    paper_name = paper_cfg["name"]
+    print(f"\n[Scraper] --- Processing: {paper_name} ---")
+
+    local_pdf_path = os.path.abspath(
+        os.path.join(TEMP_DIR, f"{paper_cfg['filename_prefix']}_{today_iso}.pdf")
+    )
+
+    # 1. Date Selection via Flatpickr
+    print(f"[{paper_name}] Setting date to {today_iso}...")
+    page.evaluate(f"""() => {{
+        const fp = document.querySelector("#datePicker");
+        if (fp && fp._flatpickr) {{
+            fp._flatpickr.setDate("{today_iso}", true);
+        }} else if (fp) {{
+            fp.value = "{today_iso}";
+            fp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            fp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }}
+    }}""")
+    page.wait_for_timeout(1000)
+
+    # 2. Select Language
+    print(f"[{paper_name}] Selecting language: {paper_cfg['language']}...")
+    lang_select = page.get_by_label("Language")
+    select_dropdown_option(lang_select, paper_cfg["language"])
+    page.wait_for_timeout(1000)
+
+    # 3. Select Newspaper
+    print(f"[{paper_name}] Selecting newspaper: {paper_cfg['newspaper']}...")
+    paper_select = page.get_by_label("Newspaper", exact=True)
+    select_dropdown_option(paper_select, paper_cfg["newspaper"])
+    page.wait_for_timeout(1200)
+
+    # 4. Select Edition
+    print(f"[{paper_name}] Selecting edition: {paper_cfg['edition']}...")
+    edition_select = page.get_by_label("Edition")
+    select_dropdown_option(edition_select, paper_cfg["edition"])
+    page.wait_for_timeout(1000)
+
+    # 5. Generate & Download PDF
+    print(f"[{paper_name}] Triggering PDF Generation & Download...")
+    with page.expect_download(timeout=90000) as download_info:
+        page.get_by_role("button", name=" Generate & Download PDF").click()
+
+    download = download_info.value
+    download.save_as(local_pdf_path)
+    print(f"[{paper_name} Success] Downloaded to: '{local_pdf_path}'")
+
+    return local_pdf_path
+
+
+def run_scraper() -> list[str]:
+    """Scrapes all configured newspaper PDFs with stealth evasion."""
     today = datetime.datetime.now()
     today_iso = today.strftime("%Y-%m-%d")
 
     os.makedirs(TEMP_DIR, exist_ok=True)
-    local_pdf_path = os.path.abspath(
-        os.path.join(TEMP_DIR, f"Loksatta_{today_iso}.pdf")
-    )
+    downloaded_files = []
 
-    print(f"[Scraper] Starting automated scrape process for date: {today_iso}")
+    print(f"[Scraper] Starting automated scrape run for date: {today_iso}")
 
     user_data_dir = os.path.join(tempfile.gettempdir(), "clean_chrome_stealth_profile")
 
@@ -128,69 +243,40 @@ def run_scraper() -> str:
         except Exception as e:
             print(f"[Scraper] Warning - couldn't save cookies: {e}")
 
-        # 1. Date Selection via Flatpickr
-        print(f"[Scraper] Setting date to {today_iso}...")
-        page.evaluate(f"""() => {{
-            const fp = document.querySelector("#datePicker");
-            if (fp && fp._flatpickr) {{
-                fp._flatpickr.setDate("{today_iso}", true);
-            }} else if (fp) {{
-                fp.value = "{today_iso}";
-                fp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                fp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            }}
-        }}""")
+        # Iterate through newspapers
+        for paper_cfg in PAPERS_CONFIG:
+            try:
+                pdf_path = download_paper(page, paper_cfg, today_iso)
+                downloaded_files.append(pdf_path)
+            except Exception as e:
+                print(f"[Scraper Error] Failed to download {paper_cfg['name']}: {e}")
 
-        page.wait_for_timeout(1500)
-
-        # 2. Select Language
-        print("[Scraper] Selecting language: Marathi...")
-        lang_select = page.get_by_label("Language")
-        lang_select.wait_for(state="visible", timeout=30000)
-        lang_select.select_option(value="marathi")
-
-        page.wait_for_timeout(1000)
-
-        # 3. Select Newspaper
-        print("[Scraper] Selecting newspaper: Loksatta...")
-        paper_select = page.get_by_label("Newspaper", exact=True)
-        paper_select.wait_for(state="visible", timeout=10000)
-        paper_select.select_option(value="Loksatta")
-
-        page.wait_for_timeout(1000)
-
-        # 4. Select Edition
-        print("[Scraper] Selecting edition: Pune...")
-        edition_select = page.get_by_label("Edition")
-        edition_select.wait_for(state="visible", timeout=10000)
-        edition_select.select_option(value="Pune")
-
-        # 5. Generate & Download PDF
-        print("[Scraper] Generating & Downloading PDF...")
-        with page.expect_download(timeout=90000) as download_info:
-            page.get_by_role("button", name=" Generate & Download PDF").click()
-
-        download = download_info.value
-        download.save_as(local_pdf_path)
+            # Brief pause between downloads to let site clear
+            page.wait_for_timeout(2000)
 
         context.close()
 
-    print(f"[Success] PDF downloaded and saved locally to: '{local_pdf_path}'")
+    # Google Drive Backup
+    if downloaded_files:
+        try:
+            from drive_utils import upload_file_to_drive
 
-    # 6. Drive Backup
-    try:
-        from drive_utils import upload_file_to_drive
+            print("\n[System] Uploading downloaded PDFs to Google Drive...")
+            for file_path in downloaded_files:
+                try:
+                    drive_file_id = upload_file_to_drive(file_path, INPUT_FOLDER_ID)
+                    print(
+                        f"[Drive Success] Uploaded '{os.path.basename(file_path)}'! File ID: {drive_file_id}"
+                    )
+                except Exception as e:
+                    print(f"[Drive Warning] Failed uploading {file_path}: {e}")
+        except Exception as e:
+            print(f"[Drive Warning] Drive module skipped or unavailable: {e}")
 
-        print("[System] Uploading PDF to Google Drive...")
-        drive_file_id = upload_file_to_drive(local_pdf_path, INPUT_FOLDER_ID)
-        print(f"[Drive Success] Uploaded! File ID: {drive_file_id}")
-    except Exception as e:
-        print(f"[Drive Warning] Drive upload skipped or failed: {e}")
-
-    return local_pdf_path
+    return downloaded_files
 
 
-def scrape_and_upload() -> str:
+def scrape_and_upload() -> list[str]:
     return run_scraper()
 
 
