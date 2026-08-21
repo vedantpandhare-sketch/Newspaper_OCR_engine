@@ -13,6 +13,7 @@ Pillow
 python-dotenv
 pymongo
 dnspython
+requests
 
 # --- Scraper ---
 playwright

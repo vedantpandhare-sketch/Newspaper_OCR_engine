@@ -64,6 +64,7 @@ credentials_old.json
 token.json
 temp_downloads/
 temp_outputs/
+logs/
 .env
 __pycache__/
 *.pyc
