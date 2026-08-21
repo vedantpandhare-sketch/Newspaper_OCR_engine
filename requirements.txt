@@ -1,11 +1,18 @@
-# --- OCR / PDF core (versions pinned together for compatibility) ---
-# paddlepaddle 2.6.2 predates NumPy 2 support, so numpy/opencv must stay on
-# NumPy-1-compatible releases or pip's resolver will conflict.
-numpy==1.26.4
-opencv-python==4.10.0.84
-PyMuPDF==1.26.3
-paddlepaddle==2.6.2
-paddleocr==2.9.1
+# --- OCR / PDF core ---
+# ocr_pipeline.py uses paddleocr's 3.x pipeline API (.predict(), PP-OCRv5
+# model names, use_doc_orientation_classify, ...) which only exists from
+# paddleocr>=3.0.0 - do not downgrade paddleocr/paddlepaddle below 3.x
+# without re-checking ocr_pipeline.py's API usage.
+#
+# numpy/opencv/PyMuPDF are intentionally NOT hard-pinned here: the verified
+# working versions (numpy 2.3.5, opencv-python 5.0.0.93) require Python
+# >=3.11, which venv310/CI (Python 3.10) can't install. Left unpinned so
+# pip resolves whatever numpy/opencv build paddleocr 3.7.0 / paddlepaddle
+# 3.0.0 actually need for the interpreter in use.
+paddlepaddle==3.0.0
+paddleocr==3.7.0
+opencv-python
+PyMuPDF
 pdf2image
 
 # --- Utilities ---
