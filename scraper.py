@@ -95,6 +95,32 @@ def auto_solve_turnstile(page):
     return False
 
 
+def dump_debug_state(page, tag: str):
+    """
+    Saves a screenshot + HTML snapshot of the current page so that a failed
+    Cloudflare verification can be diagnosed after the fact (e.g. from a CI
+    debug artifact) instead of guessing from a bare timeout message.
+    """
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    base = os.path.join(TEMP_DIR, f"debug_{tag}")
+    try:
+        page.screenshot(path=f"{base}.png", full_page=True)
+    except Exception as e:
+        print(f"[Scraper Debug] Could not save screenshot: {e}")
+    try:
+        with open(f"{base}.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+    except Exception as e:
+        print(f"[Scraper Debug] Could not save HTML snapshot: {e}")
+    try:
+        frame_urls = [frame.url for frame in page.frames]
+        with open(f"{base}_frames.json", "w", encoding="utf-8") as f:
+            json.dump({"page_url": page.url, "frames": frame_urls}, f, indent=2)
+    except Exception as e:
+        print(f"[Scraper Debug] Could not save frame list: {e}")
+    print(f"[Scraper Debug] Saved diagnostic snapshot: {base}.png / .html / _frames.json")
+
+
 def select_dropdown_option(select_locator, target_text: str):
     """
     Robustly selects an option from a dropdown locator matching either value,
@@ -253,6 +279,7 @@ def run_scraper() -> list[str]:
             except Exception as e:
                 last_error = e
                 print(f"[Scraper] Verification attempt {attempt} failed: {e}")
+                dump_debug_state(page, f"verify_attempt_{attempt}")
                 if attempt < MAX_VERIFY_ATTEMPTS:
                     wait_s = 5 * attempt
                     print(f"[Scraper] Retrying in {wait_s}s with a fresh page load...")
