@@ -195,11 +195,11 @@ if __name__ == "__main__":
     # Specify paper JSON paths and target index mappings here for testing
     TEST_FILES = [
         {
-            "json_path": r"D:\Newspaper_OCR_engine\temp_downloads\Loksatta_2026-08-19_ocr.json",
+            "json_path": r"D:\Newspaper_OCR_engine\temp_downloads\Loksatta_2026-08-21_ocr.json",
             "index_name": "loksttapune",  # Replace with your actual index name
         },
         {
-            "json_path": r"D:\Newspaper_OCR_engine\temp_downloads\Lokmat_2026-08-19_ocr.json",
+            "json_path": r"D:\Newspaper_OCR_engine\temp_downloads\Lokmat_2026-08-21_ocr.json",
             "index_name": "lokmatpune",   # Replace with your actual index name
         },
     ]

@@ -1,40 +1,57 @@
-name: Automated Newspaper OCR Pipeline
+name: Daily Newspaper OCR & Vector Pipeline
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # Runs daily at 3:00 AM UTC (8:30 AM IST)
-  workflow_dispatch:      # Allows manual one-click runs from GitHub UI/Mobile
+    - cron: '30 1 * * *'  # 01:30 UTC = 7:00 AM IST
+  workflow_dispatch: {}     # manual "Run workflow" button in GitHub UI
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
-      - name: Install System OCR Dependencies (Tesseract/Poppler if needed)
+      - name: Install system dependencies (Xvfb for non-headless Chrome, OpenCV/PDF libs)
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-mar poppler-utils
+          sudo apt-get install -y xvfb libgl1-mesa-glx libglib2.0-0 poppler-utils
 
-      - name: Install Python Dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install --with-deps chromium
 
-      - name: Step 1 - Scrape & Upload to Drive Input
-        env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-        run: python scraper.py
+      - name: Install real Google Chrome for Playwright (scraper uses channel="chrome")
+        run: python -m playwright install chrome --with-deps
 
-      - name: Step 2, 3 & 4 - Run OCR & Upload Output JSON to Drive
+      - name: Run full pipeline (Scrape -> OCR -> MongoDB -> Pinecone)
         env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-        run: python ocr_pipeline.py
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GDRIVE_TOKEN_JSON: ${{ secrets.GDRIVE_TOKEN_JSON }}
+          # Keep PaddleOCR/OpenMP from over-subscribing the runner's CPU
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          FLAGS_allocator_strategy: "naive_best_fit"
+        run: xvfb-run -a python run_pipeline_cli.py
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-debug-${{ github.run_id }}
+          path: |
+            temp_downloads/
+          if-no-files-found: ignore
+          retention-days: 5

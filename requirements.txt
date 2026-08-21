@@ -16,6 +16,7 @@ numpy==1.26.4
 Pillow
 dotenv
 playwright
+playwright-stealth
 pymongo
 dnspython
 google-api-python-client

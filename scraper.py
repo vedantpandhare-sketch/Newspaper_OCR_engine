@@ -218,22 +218,52 @@ def run_scraper() -> list[str]:
         # Apply stealth rules safely
         apply_stealth(page)
 
-        print("[Scraper] Navigating to target portal...")
-        page.goto(
-            "https://www.tradingref.com/",
-            timeout=60000,
-            wait_until="domcontentloaded",
-        )
+        # Cloudflare Turnstile is adversarial and can fail intermittently on
+        # unattended/CI runs (cloud IPs are scrutinized harder than a home IP).
+        # Retry the full navigate -> solve -> verify cycle a few times before
+        # giving up, instead of failing the whole run on one bad attempt.
+        MAX_VERIFY_ATTEMPTS = 3
+        verified = False
+        last_error = None
 
-        auto_solve_turnstile(page)
+        for attempt in range(1, MAX_VERIFY_ATTEMPTS + 1):
+            try:
+                print(
+                    f"[Scraper] Navigating to target portal "
+                    f"(attempt {attempt}/{MAX_VERIFY_ATTEMPTS})..."
+                )
+                page.goto(
+                    "https://www.tradingref.com/",
+                    timeout=60000,
+                    wait_until="domcontentloaded",
+                )
 
-        print("[Scraper] Waiting for main form controls...")
-        try:
-            page.wait_for_selector("#datePicker", state="visible", timeout=30000)
-        except Exception:
-            print("[Scraper] Secondary verification attempt...")
-            auto_solve_turnstile(page)
-            page.wait_for_selector("#datePicker", state="visible", timeout=30000)
+                auto_solve_turnstile(page)
+
+                print("[Scraper] Waiting for main form controls...")
+                try:
+                    page.wait_for_selector("#datePicker", state="visible", timeout=30000)
+                except Exception:
+                    print("[Scraper] Secondary verification attempt...")
+                    auto_solve_turnstile(page)
+                    page.wait_for_selector("#datePicker", state="visible", timeout=30000)
+
+                verified = True
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[Scraper] Verification attempt {attempt} failed: {e}")
+                if attempt < MAX_VERIFY_ATTEMPTS:
+                    wait_s = 5 * attempt
+                    print(f"[Scraper] Retrying in {wait_s}s with a fresh page load...")
+                    page.wait_for_timeout(wait_s * 1000)
+
+        if not verified:
+            context.close()
+            raise RuntimeError(
+                "Cloudflare verification failed after "
+                f"{MAX_VERIFY_ATTEMPTS} attempts: {last_error}"
+            )
 
         print("[Scraper] Access confirmed! Persisting fresh clearance cookies...")
         try:
