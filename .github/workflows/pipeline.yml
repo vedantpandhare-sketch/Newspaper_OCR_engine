@@ -48,6 +48,10 @@ jobs:
           OMP_NUM_THREADS: "2"
           MKL_NUM_THREADS: "2"
           FLAGS_allocator_strategy: "naive_best_fit"
+          # The runner's CPU lacks the instruction set oneDNN's fused
+          # self-attention kernel assumes, which SIGILLs otherwise (see repo
+          # history) - disable oneDNN for CI runs only.
+          OCR_DISABLE_MKLDNN: "1"
         run: python run_process_only_cli.py
 
       - name: Upload debug artifacts on failure

@@ -16,17 +16,31 @@ OUTPUT_FOLDER_ID = "1IkXvx4xZUKrvP1qnGqepGLi8whgOBPEA"
 class MarathiNewspaperTwoDimPipeline:
     def __init__(self):
         print("[System] Initializing Two-Dimensional Marathi Extraction Core...")
+
+        # oneDNN's fused self-attention CPU kernel (used by the recognizer's
+        # transformer backbone) assumes CPU instruction-set features (e.g.
+        # AVX-512) that a dev laptop may have but a cloud CI runner's CPU
+        # often doesn't - mismatched instructions there crash with SIGILL
+        # ("Illegal instruction"), not a normal exception. Disable oneDNN on
+        # CI (set OCR_DISABLE_MKLDNN=1 in that environment) while leaving it
+        # on by default for local runs, where it's a safe speedup.
+        enable_mkldnn = os.environ.get("OCR_DISABLE_MKLDNN", "0") != "1"
+        if not enable_mkldnn:
+            print("[System] OCR_DISABLE_MKLDNN=1 -> running without oneDNN "
+                  "(slower, but avoids CPU-instruction-set crashes on CI runners).")
+
         self.ocr_engine = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_textline_orientation=False, 
+            use_textline_orientation=False,
             text_detection_model_name='PP-OCRv5_mobile_det',        # lightweight vs default 'server' det model
             text_recognition_model_name='devanagari_PP-OCRv5_mobile_rec',  # must be pinned explicitly:
             # once ANY model name is set, `lang=` is silently ignored, so we
             # have to name the Marathi/devanagari recognizer ourselves or it
             # falls back to a generic model that isn't tuned for this script
-            #use_gpu=False, 
+            #use_gpu=False,
             #show_log=False,
+            enable_mkldnn=enable_mkldnn,
             text_recognition_batch_size=6,
             cpu_threads=os.cpu_count() or 4,
         )
