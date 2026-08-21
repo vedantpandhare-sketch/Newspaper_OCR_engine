@@ -1,26 +1,31 @@
-# Core deps
-torch==2.6.0
-numpy
-pymupdf
-bson
-opencv-python
-pdf2image
-paddleocr
+# --- OCR / PDF core (versions pinned together for compatibility) ---
+# paddlepaddle 2.6.2 predates NumPy 2 support, so numpy/opencv must stay on
+# NumPy-1-compatible releases or pip's resolver will conflict.
+numpy==1.26.4
+opencv-python==4.10.0.84
+PyMuPDF==1.26.3
 paddlepaddle==2.6.2
 paddleocr==2.9.1
-PyMuPDF==1.26.3
-opencv-python==4.12.0.88
-numpy==1.26.4
-# Optional: faster image ops / common utilities used by OCR stacks
-# (not required, but harmless if compatible)
+pdf2image
+
+# --- Utilities ---
 Pillow
-dotenv
-playwright
-playwright-stealth
+python-dotenv
 pymongo
 dnspython
+
+# --- Scraper ---
+playwright
+playwright-stealth
+
+# --- Google Drive ---
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
-sentence-transformers
+
+# --- Vector DB ---
 pinecone
+
+# --- Local embedding search (Streamlit "Search Vector DB" feature in main.py) ---
+torch==2.6.0
+sentence-transformers

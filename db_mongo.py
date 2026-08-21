@@ -1,7 +1,6 @@
 import os
 import json
 import datetime
-import bson
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
