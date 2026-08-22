@@ -1,8 +1,11 @@
+import datetime
 import json
 import os
 import re
 import time
 import uuid
+from collections import Counter
+
 from dotenv import load_dotenv
 from pinecone import Pinecone
 from pinecone.exceptions import PineconeApiException
@@ -10,6 +13,129 @@ from pinecone.exceptions import PineconeApiException
 # Load Environment Variables
 load_dotenv()
 
+
+# ---------------------------------------------------------------------------
+# Date parsing / normalization
+# ---------------------------------------------------------------------------
+# Every chunk's "date" used to be a single root-level extraction_date copied
+# onto ALL chunks in the file, even when different pages/articles carried
+# their own (possibly different) date fields. These helpers resolve a date
+# per page/article node instead, and normalize whatever format shows up
+# (2026-08-18, 18/8/26, 18-08-2026, ...) to a consistent "YYYY-MM-DD".
+
+_DATE_FORMATS = [
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%d-%m-%Y",
+    "%d/%m/%Y",
+    "%d-%m-%y",
+    "%d/%m/%y",
+    "%Y%m%d",
+    "%d_%m_%Y",
+    "%d_%m_%y",
+    "%m-%d-%Y",
+    "%m/%d/%Y",
+]
+
+
+def parse_date_value(value) -> "datetime.date | None":
+    """Best-effort parse of a date-like value into a datetime.date, or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def normalize_date_value(value) -> str:
+    """Normalizes any recognized date format to 'YYYY-MM-DD'. Empty string if unparseable."""
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        return value.strip()
+    parsed = parse_date_value(value)
+    return parsed.strftime("%Y-%m-%d") if parsed else ""
+
+
+def infer_date_from_path(path: str) -> str:
+    """
+    Falls back to deriving a date from the source filename when the JSON
+    payload doesn't carry one at the page/article level, e.g.
+    'Loksatta_2026-08-21_ocr.json' -> '2026-08-21'.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+
+    patterns = [
+        r"(20\d{2}-\d{1,2}-\d{1,2})",
+        r"(\d{1,2}[-_/]\d{1,2}[-_/](?:\d{2}|\d{4}))",
+        r"(\d{4}\d{2}\d{2})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, stem)
+        if m:
+            normalized = normalize_date_value(m.group(1))
+            if normalized:
+                return normalized
+    return ""
+
+
+def find_date_in_node(node) -> str:
+    """
+    Searches a page/article node for the first plausible date field,
+    preferring keys whose names suggest they actually are a date
+    (extraction_date, article_date, published_date, ...), before falling
+    back to a looser "contains 'date'" match. Recurses into nested
+    dicts/lists so a date on the specific article, not just the page or
+    the root, is preferred and found.
+    """
+    if isinstance(node, dict):
+        preferred_keys = (
+            "extraction_date",
+            "article_date",
+            "published_date",
+            "publish_date",
+            "pub_date",
+            "date",
+            "issue_date",
+        )
+
+        for key in preferred_keys:
+            for k, v in node.items():
+                if str(k).lower() == key:
+                    normalized = normalize_date_value(v)
+                    if normalized:
+                        return normalized
+
+        for k, v in node.items():
+            key = str(k).lower()
+            if any(token in key for token in ("date", "publish", "issue")):
+                normalized = normalize_date_value(v)
+                if normalized:
+                    return normalized
+
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                found = find_date_in_node(v)
+                if found:
+                    return found
+
+    elif isinstance(node, list):
+        for item in node:
+            found = find_date_in_node(item)
+            if found:
+                return found
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Chunking / text extraction
+# ---------------------------------------------------------------------------
 
 def split_text_smart(
     text: str, chunk_size: int = 700, overlap: int = 100
@@ -73,6 +199,17 @@ def extract_text_from_node(node) -> str:
     return ""
 
 
+def resolve_page_number(page_item, fallback: int) -> int:
+    if isinstance(page_item, dict):
+        for key in ("page_number", "page", "page_no", "pageNum"):
+            value = page_item.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+    return fallback
+
+
 def upsert_with_retry(index, namespace, batch, max_retries=6, base_delay=20):
     """Upserts records to Pinecone with exponential backoff on HTTP 429 rate limits."""
     for attempt in range(1, max_retries + 1):
@@ -100,7 +237,9 @@ def ingest_json_to_pinecone(
 ) -> int:
     """
     Parses an OCR JSON file, chunks the extracted text, and streams records into
-    a specified Pinecone index.
+    a specified Pinecone index. Each chunk's date is resolved from its own
+    page/article node first (falling back to the filename's date, then
+    "unknown"), instead of one root-level date being stamped onto everything.
     """
     api_key = os.getenv("PINECONE_API_KEY")
     if not api_key:
@@ -115,10 +254,9 @@ def ingest_json_to_pinecone(
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # Resolve extraction date
-    extraction_date = "unknown"
-    if isinstance(data, dict):
-        extraction_date = data.get("extraction_date", data.get("date", "unknown"))
+    # Root-level date is now only a fallback, not the answer for every chunk.
+    root_date = find_date_in_node(data) or infer_date_from_path(json_path)
+    print(f"[Ingest] Fallback date (root/filename): {root_date or 'unknown'}")
 
     # Determine structural format of pages
     pages_to_process = []
@@ -140,15 +278,14 @@ def ingest_json_to_pinecone(
     # Generate chunked records
     records = []
     paper_identifier = os.path.basename(json_path).split("_")[0]
+    date_counter = Counter()
 
     for idx, page_item in enumerate(pages_to_process, start=1):
-        page_number = idx
+        page_number = resolve_page_number(page_item, idx)
 
-        if isinstance(page_item, dict):
-            if "page_number" in page_item:
-                page_number = page_item["page_number"]
-            elif "page" in page_item and isinstance(page_item["page"], int):
-                page_number = page_item["page"]
+        # Resolve THIS page/article's own date, falling back to the
+        # file-level date only when the node itself doesn't carry one.
+        page_date = find_date_in_node(page_item) or root_date
 
         full_text = extract_text_from_node(page_item)
         if not full_text.strip():
@@ -157,18 +294,23 @@ def ingest_json_to_pinecone(
         chunks = split_text_smart(full_text, chunk_size=700, overlap=100)
 
         for chunk_id, chunk in enumerate(chunks):
+            date_counter[page_date or "unknown"] += 1
             records.append(
                 {
                     "_id": str(uuid.uuid4()),
                     "text": chunk,
                     "page": page_number,
                     "chunk": chunk_id,
-                    "date": extraction_date,
+                    "date": page_date or "",
                     "source_paper": paper_identifier,
                 }
             )
 
     print(f"[Ingest] Generated {len(records)} total text chunks.")
+    if date_counter:
+        print("[Ingest] Chunk counts by resolved date:")
+        for d, count in sorted(date_counter.items()):
+            print(f"    {d}: {count}")
 
     if not records:
         print("[Warning] No valid text chunks generated for upload.")
