@@ -13,7 +13,11 @@ import traceback
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
-from db_mongo import save_raw_ocr_json
+from db_mongo import (
+    has_already_ingested_to_pinecone,
+    mark_pinecone_ingested,
+    save_raw_ocr_json,
+)
 from ocr_pipeline import process_pdf_to_json
 from pipeingest import ingest_json_to_pinecone
 
@@ -54,14 +58,35 @@ def process_and_ingest(pdf_paths: list[str]) -> list[dict]:
             log(f"  -> Saved to collection '{collection_name}' (id={doc_id})")
 
             # Phase 4: Pinecone
+            # Guard: Pinecone's hosted embedding model burns quota on every
+            # upsert_records() call, win or lose. If this exact paper+date
+            # was already successfully vectorized (e.g. this is a retry
+            # after a later phase failed, or a manual re-trigger landed on
+            # top of an already-processed day), skip re-embedding instead
+            # of silently re-spending quota.
+            source_filename = os.path.basename(output_json_path)
             target_index = INDEX_MAPPING.get(
                 paper_name.lower(), f"{paper_name.lower()}-index"
             )
+
+            if has_already_ingested_to_pinecone(source_filename, collection_name):
+                log(f"  -> Already ingested to Pinecone earlier today - skipping "
+                    f"re-embedding to avoid burning quota redundantly.")
+                results.append({
+                    "paper": paper_name,
+                    "status": "skipped_already_ingested",
+                    "collection": collection_name,
+                    "index": target_index,
+                    "vectors": 0,
+                })
+                continue
+
             log(f"[Phase 4/4] Ingesting {paper_name} vectors into '{target_index}'...")
             vector_count = ingest_json_to_pinecone(
                 json_path=output_json_path, index_name=target_index
             )
             log(f"  -> Ingested {vector_count} chunks into '{target_index}'")
+            mark_pinecone_ingested(doc_id, collection_name)
 
             results.append({
                 "paper": paper_name,
@@ -88,7 +113,10 @@ def print_summary(results: list[dict]) -> bool:
     for r in results:
         if r["status"] == "success":
             any_success = True
-            log(f"  OK   {r['paper']}: {r['vectors']} vectors -> '{r['index']}'")
+            log(f"  OK      {r['paper']}: {r['vectors']} vectors -> '{r['index']}'")
+        elif r["status"] == "skipped_already_ingested":
+            any_success = True  # already-done work is not a failure
+            log(f"  SKIPPED {r['paper']}: already ingested to Pinecone today")
         else:
-            log(f"  FAIL {r['paper']}: {r['error']}")
+            log(f"  FAIL    {r['paper']}: {r['error']}")
     return any_success

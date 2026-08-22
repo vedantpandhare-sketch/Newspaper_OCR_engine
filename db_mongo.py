@@ -73,6 +73,33 @@ def save_raw_ocr_json(json_file_path, collection_name=None):
     return doc_id_str, collection_name
 
 
+def has_already_ingested_to_pinecone(source_filename: str, collection_name=None) -> bool:
+    """
+    Checks whether this exact OCR output (by filename, e.g.
+    'Loksatta_2026-08-21_ocr.json') has already been successfully embedded
+    into Pinecone today. Used to skip redundant re-embedding on retries/
+    re-runs, since Pinecone's hosted embedding model burns quota on every
+    upsert_records() call regardless of whether the content is new.
+    """
+    collection = get_mongo_collection(collection_name)
+    existing = collection.find_one({
+        "source_file": source_filename,
+        "pinecone_ingested": True,
+    })
+    return existing is not None
+
+
+def mark_pinecone_ingested(doc_id: str, collection_name=None):
+    """Flags a saved OCR document as already vectorized, so future runs skip it."""
+    from bson import ObjectId  # provided by pymongo itself, not the standalone bson pkg
+
+    collection = get_mongo_collection(collection_name)
+    collection.update_one(
+        {"_id": ObjectId(doc_id)},
+        {"$set": {"pinecone_ingested": True}},
+    )
+
+
 if __name__ == "__main__":
     # Test script standalone
     col_name = get_today_collection_name()
