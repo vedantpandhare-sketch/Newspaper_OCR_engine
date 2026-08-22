@@ -210,6 +210,48 @@ def download_paper(page, paper_cfg: dict, today_iso: str) -> str:
     return local_pdf_path
 
 
+def download_paper_with_retry(
+    page, paper_cfg: dict, today_iso: str, max_attempts: int = 3
+) -> str:
+    """
+    Wraps download_paper() with a reload-and-retry loop. The site's own ad
+    slots (Google Ads iframes, a '.disabled-overlay' div, etc.) sometimes
+    render on top of the "Generate & Download PDF" button after a paper is
+    selected, blocking the click for the full 30s timeout - refreshing the
+    page and re-filling the form clears that overlay far more reliably than
+    just retrying the click in place.
+    """
+    paper_name = paper_cfg["name"]
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return download_paper(page, paper_cfg, today_iso)
+        except Exception as e:
+            last_error = e
+            print(f"[{paper_name}] Attempt {attempt}/{max_attempts} failed: {e}")
+            dump_debug_state(page, f"{paper_name.lower()}_download_attempt_{attempt}")
+
+            if attempt < max_attempts:
+                print(f"[{paper_name}] Reloading page before retrying...")
+                page.goto(
+                    "https://www.tradingref.com/",
+                    timeout=60000,
+                    wait_until="domcontentloaded",
+                )
+                try:
+                    page.wait_for_selector("#datePicker", state="visible", timeout=30000)
+                except Exception:
+                    # Cloudflare occasionally re-challenges on reload too.
+                    auto_solve_turnstile(page)
+                    page.wait_for_selector("#datePicker", state="visible", timeout=30000)
+                page.wait_for_timeout(1500)
+
+    raise RuntimeError(
+        f"Failed to download {paper_name} after {max_attempts} attempts: {last_error}"
+    )
+
+
 def run_scraper() -> list[str]:
     """Scrapes all configured newspaper PDFs with stealth evasion."""
     today = datetime.datetime.now()
@@ -303,7 +345,7 @@ def run_scraper() -> list[str]:
         # Iterate through newspapers
         for paper_cfg in PAPERS_CONFIG:
             try:
-                pdf_path = download_paper(page, paper_cfg, today_iso)
+                pdf_path = download_paper_with_retry(page, paper_cfg, today_iso)
                 downloaded_files.append(pdf_path)
             except Exception as e:
                 print(f"[Scraper Error] Failed to download {paper_cfg['name']}: {e}")
